@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html>
+ <head>
+    <!-- META -->
+    <title>JS Inventory Management</title>
+    <meta charset="utf-8">
+    <meta name="description" content="Experimental JS Inventory System">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.5">
+
+    <!-- ICONS -->
+    <link rel="icon" href="images/favicon.png" type="image/png">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="white">
+    <link rel="apple-touch-icon" href="images/icon-512.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="JS Inventory">
+    <meta name="msapplication-TileImage" content="images/icon-512.png">
+    <meta name="msapplication-TileColor" content="#ffffff">
+
+    <!-- MANIFEST -->
+    <link rel="manifest" href="js-inventory-manifest.json">
+
+    <!-- INVENTORY CSS + JS -->
+    <link rel="stylesheet" href="js-inventory.css">
+    <script src="js-inventory-db.js"></script>
+    <script src="js-inventory-items.js"></script>
+    <script src="js-inventory-move.js"></script>
+    <script src="js-inventory.js"></script>
+
+<style>
+/* (A) UNIVERSAL */
+/* (A1) LAYOUT */
+* {
+  font-family: Arial, Helvetica, sans-serif;
+  box-sizing: border-box;
+}
+body {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 15px;
+}
+.ninja { display: none; }
+.flex {
+  display: flex;
+  align-items: stretch;
+}
+.grow { flex-grow: 1; }
+.bold { font-weight: 700; }
+
+/* (A2) ZEBRA STRIPE LIST */
+.zebra .row:nth-child(odd) { background: #f2f2f2; }
+.zebra .row { margin-top: 10px; }
+.zebra input {
+  margin: 0;
+  padding: 0 15px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #898989 !important;
+  background: transparent !important;
+}
+.zebra .grow { padding: 10px; }
+
+/* (A3) FORM */
+form {
+  padding: 20px;
+  background: #f2f2f2;
+}
+input, label, select {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+}
+input, select { padding: 10px; }
+button, input[type=button], input[type=submit] {
+  width: auto;
+  border: 0;
+  color: #fff;
+  background: #a70000;
+  cursor: pointer;
+}
+#itemGo input, #mGo input {
+  margin: 1px;
+  width: 50%;
+}
+
+/* (B) ITEMS LIST */
+#itemAdd {
+  padding: 15px 0;
+  margin-bottom: 10px;
+  color: #898989;
+  border: 2px dashed #aaa;
+  text-align: center;
+  font-size: 24px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* (C) MOVEMENT LIST */
+.moveQty {
+  padding: 20px;
+  font-weight: 700;
+  font-size: 24px;
+}
+#moveBack {
+  width: 100%;
+  margin-top: 20px;
+}
+</style>
+
+<script>
+var inv = {
+  // (A) INITIALIZE APP
+  init : async () => {
+    // (A1) CHECK - INDEXED DATABASE SUPPORT
+    if (!IDB) {
+      alert("INDEXED DB IS NOT SUPPORTED ON THIS BROWSER!");
+      return;
+    }
+
+    // (A2) CHECK - SERVICE WORKER SUPPORT
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("js-inventory-worker.js");
+    } else {
+      alert("SERVICE WORKER IS NOT SUPPORTED ON THIS BROWSER!");
+      return;
+    }
+
+    // (A3) DATABASE + INTERFACE SETUP
+    if (await invDB.init()) { items.list(true); }
+    else {
+      alert("ERROR OPENING INDEXED DB!");
+      return;
+    }
+  },
+
+  // (B) TOGGLE PAGE
+  pg : p => { for (let i of ["A", "B", "C"]) {
+    if (p==i) {
+      document.getElementById("pg" + i).classList.remove("ninja");
+    } else {
+      document.getElementById("pg" + i).classList.add("ninja");
+    }
+  }},
+
+  // (X) RUN THIS IF YOU WANT DUMMY DEMO DATA
+  dummy : () => {
+    invDB.tx("put", "Items", { sku: "ABC123", name: "Foo Bar", qty: 123 });
+    invDB.tx("put", "Items", { sku: "BCD234", name: "Goo Bar", qty: 321 });
+    invDB.tx("put", "Items", { sku: "CDE345", name: "Hoo Bar", qty: 231 });
+    invDB.tx("put", "Items", { sku: "DEF456", name: "Joo Bar", qty: 213 });
+    invDB.tx("put", "Items", { sku: "EFG567", name: "Koo Bar", qty: 312 });
+    invDB.tx("put", "Movement", { sku: "ABC123", date: Date.now()-30000, direction: "T", qty: 123 });
+    invDB.tx("put", "Movement", { sku: "ABC123", date: Date.now()-20000, direction: "O", qty: 23 });
+    invDB.tx("put", "Movement", { sku: "ABC123", date: Date.now()-10000, direction: "O", qty: 32 });
+    invDB.tx("put", "Movement", { sku: "ABC123", date: Date.now(), direction: "I", qty: 55 });
+  }
+};
+window.addEventListener("DOMContentLoaded", inv.init);
+
+
+// (A) INDEXED DB
+const IDB = window.indexedDB || window.mozIndexedDB || window.webkitIndexedDB || window.msIndexedDB;
+var invDB = {
+  // (B) INITIALIZE DATABASE
+  db : null,
+  init : () => new Promise((resolve, reject) => {
+    // (B1) OPEN INVENTORY DATABASE
+    invDB.db = IDB.open("JSINV", 1);
+
+    // (B2) CREATE INVENTORY DATABASE
+    invDB.db.onupgradeneeded = e => {
+      // (B2-1) INVENTORY DATABASE
+      invDB.db = e.target.result;
+
+      // (B2-2) ITEMS STORE
+      let store = invDB.db.createObjectStore("Items", { keyPath: "sku" });
+      store.createIndex("name", "name");
+
+      // (B2-3) MOVEMENT STORE
+      store = invDB.db.createObjectStore("Movement", { keyPath: ["sku", "date"] }),
+      store.createIndex("direction", "direction");
+    };
+
+    // (B3) ON IDB OPEN
+    invDB.db.onsuccess = e => {
+      invDB.db = e.target.result;
+      resolve(true);
+    };
+
+    // (B4) ON IDB ERROR
+    invDB.db.onerror = e => reject(e.target.error);
+  }),
+
+  // (C) TRANSACTION "MULTI-TOOL"
+  tx : (action, store, data) => new Promise((resolve, reject) => {
+    // (C1) GET OBJECT STORE
+    let req, tx = invDB.db.transaction(store, "readwrite").objectStore(store);
+
+    // (C2) PROCESS ACTION
+    switch (action) {
+      // (C2-1) NADA
+      default: reject("Invalid database action"); break;
+
+      // (C2-2) PUT
+      case "put":
+        req = tx.put(data);
+        req.onsuccess = e => resolve(true);
+        break;
+
+      // (C2-3) DELETE
+      case "del":
+        req = tx.delete(data);
+        req.onsuccess = e => resolve(true);
+        break;
+
+      // (C2-4) GET
+      case "get":
+        req = tx.get(data);
+        req.onsuccess = e => resolve(e.target.result);
+        break;
+
+      // (C2-5) GET ALL
+      case "getAll":
+        req = tx.getAll(data);
+        req.onsuccess = e => resolve(e.target.result);
+        break;
+
+      // (C2-6) CURSOR
+      case "cursor":
+        resolve(tx.openCursor(data));
+        break;
+    }
+    req.onerror = e => reject(e.target.error);
+  })
+};
+
+var items = {
+  // (A) HTML ITEMS LIST
+  list : async (toggle) => {
+    // (A1) GET ALL ITEMS
+    let all = await invDB.tx("getAll", "Items"),
+        hList = document.getElementById("itemList");
+
+    // (A2) DRAW HTML LIST
+    hList.innerHTML = "";
+    if (all.length==0) {
+      hList.innerHTML = "<div class='row'><div class='grow'>No items found</div></div>";
+    } else { for (let i of all) {
+      let row = document.createElement("div");
+      row.className = "row flex";
+      row.innerHTML =
+      `<div class="grow">
+        <div class="bold">[${i["sku"]}] ${i["name"]}</div>
+        Qty: ${i["qty"]}
+      </div>
+      <input type="button" value="&#x2716;" onclick="items.del('${i["sku"]}')">
+      <input type="button" value="&#x270E;" onclick="items.addEdit('${i["sku"]}')">
+      <input type="button" value="&#8634;" onclick="move.list('${i["sku"]}')">`;
+      hList.appendChild(row);
+    }}
+    if (toggle) { inv.pg("A"); }
+  },
+
+  // (B) DELETE ITEM
+  del : async (sku) => { if (confirm("Delete item?")) {
+    await invDB.tx("del", "Movement", IDBKeyRange.bound([sku, 0], [sku, Date.now()]));
+    await invDB.tx("del", "Items", sku);
+    items.list(true);
+  }},
+
+  // (C) ADD/EDIT ITEM
+  addEdit : async (sku) => {
+    // (C1) RESET FORM
+    document.getElementById("pgB").reset();
+    document.getElementById("itemOSKU").value = "";
+
+    // (C2) EDIT MODE
+    if (typeof sku == "string") {
+      let item = await invDB.tx("get", "Items", sku);
+      document.getElementById("itemOSKU").value = sku;
+      document.getElementById("itemSKU").value = item.sku;
+      document.getElementById("itemName").value = item.name;
+    }
+
+    // (C3) SWITCH PAGE
+    inv.pg("B");
+  },
+
+  // (D) SAVE ITEM
+  save : async () => {
+    // (D1) GET DATA FROM HTML FORM
+    let osku = document.getElementById("itemOSKU").value,
+    data = {
+      sku : document.getElementById("itemSKU").value,
+      name : document.getElementById("itemName").value,
+      qty : 0
+    };
+
+    // (D2) ADD NEW ITEM
+    if (osku=="") {
+      // (D2-1) CHECK IF ALREADY EXIST
+      if (await invDB.tx("get", "Items", data["sku"]) !== undefined) {
+        alert(`${data["sku"]} is already registered!`);
+        return;
+      }
+
+      // (D2-2) SAVE
+      await invDB.tx("put", "Items", data);
+      items.list(true);
+    }
+
+    // (D3) UPDATE ITEM
+    else {
+      // (D3-1) GET ITEM
+      let item = await invDB.tx("get", "Items", osku);
+      data["qty"] = item["qty"];
+
+      // (D3-2) JUST SAVE IF NOT CHANGING SKU
+      if (osku==data["sku"]) {
+        await invDB.tx("put", "Items", data);
+        items.list(true);
+      }
+
+      // (D3-3) HEADACHE IF CHANGING SKU
+      else {
+        // (D3-3-1) CHECK IF NEW SKU ALREADY REGISTERED
+        if (await invDB.tx("get", "Items", data["sku"]) !== undefined) {
+          alert(`${data["sku"]} is already registered!`);
+          return;
+        }
+
+        // (D3-3-2) ADD NEW SKU + DELETE OLD SKU
+        invDB.tx("put", "Items", data);
+        invDB.tx("del", "Items", osku);
+
+        // (D3-3-3) "UPDATE" SKU OF ALL MOVEMENT WITH PUT-DEL
+        let req = await invDB.tx("cursor", "Movement", IDBKeyRange.bound([osku, 0], [osku, Date.now()]));
+        req.onsuccess = e => {
+          const cursor = e.target.result;
+          if (cursor) {
+            // ERROR - CANNOT DIRECTLY CHANGE KEY. THUS THE "DUMB" PUT-DELETE WAY.
+            // cursor.update({ sku: NEW SKU }); 
+            let entry = cursor.value;
+            entry.sku = data["sku"];
+            invDB.tx("put", "Movement", entry);
+            cursor.delete();
+            cursor.continue();
+          } else { items.list(true); }
+        };
+      }
+    }
+  }
+};
+
+{
+  "short_name": "JS Inventory",
+  "name": "JS Inventory",
+  "icons": [{
+     "src": "images/favicon.png",
+     "sizes": "64x64",
+     "type": "image/png"
+  }, {
+    "src": "images/icon-512.png",
+    "sizes": "512x512",
+    "type": "image/png"
+  }],
+  "start_url": "js-inventory.html",
+  "scope": "/",
+  "background_color": "white",
+  "theme_color": "white",
+  "display": "standalone"
+}
+var move = {
+  // (A) HTML ITEM MOVEMENT LIST
+  list : async (sku) => {
+    // (A1) "PRESET" MOVEMENT FORM
+    document.getElementById("moveSKU").value = sku;
+    document.getElementById("moveDirection").value = "I";
+    document.getElementById("moveQty").value = 1;
+
+    // (A2) GET MOVEMENT
+    let all = await invDB.tx("getAll", "Movement", IDBKeyRange.bound([sku, 0], [sku, Date.now()])),
+        hList = document.getElementById("moveList"),
+        d = { "I" : "In", "O" : "Out", "T" : "Stock Take" };
+
+    // (A3) DRAW MOVEMENT
+    hList.innerHTML = "";
+    if (all.length == 0) {
+      hList.innerHTML = "<div class='row'><div class='grow'>No movement found</div></div>";
+    } else { for (let m of all) {
+      let row = document.createElement("div"),
+          date = new Date(m["date"]).toString();
+      row.className = "row flex";
+      row.innerHTML =
+      `<div class="grow">
+         <strong>${d[m["direction"]]}</strong><br>${date}
+       </div>
+       <div class="moveQty">${m["qty"]}</div>`;
+       hList.appendChild(row);
+    }}
+    inv.pg("C");
+  },
+
+  // (B) SAVE MOVEMENT
+  save : async () => {
+    // (B1) GET HTML FORM DATA
+    let data = {
+      sku: document.getElementById("moveSKU").value,
+      direction: document.getElementById("moveDirection").value,
+      qty: +document.getElementById("moveQty").value,
+      date: Date.now()
+    };
+
+    // (B2) GET ITEM
+    let item = await invDB.tx("get", "Items", data["sku"]);
+
+    // (B3) UPDATE QUANTITY
+    if (data["direction"] == "T") { item["qty"] = data["qty"]; }
+    else if (data["direction"] == "I") { item["qty"] += data["qty"]; }
+    else { item["qty"] -= data["qty"]; }
+    if (item["qty"] < 0) { data["qty"] = 0; }
+    await invDB.tx("put", "Items", item);
+
+    // (B4) ADD MOVEMENT
+    await invDB.tx("put", "Movement", data);
+
+    // (B5) DONE
+    move.list(data["sku"]);
+    items.list()
+  }
+};
+
+// (A) CREATE/INSTALL CACHE
+self.addEventListener("install", evt => {
+  self.skipWaiting();
+  evt.waitUntil(
+    caches.open("JSINV")
+    .then(cache => cache.addAll([
+      "js-inventory.css",
+      "js-inventory.html",
+      "js-inventory-db",
+      "js-inventory-db.js",
+      "js-inventory-items.js",
+      "js-inventory-move.js",
+      "js-inventory-manifest.json",
+      "images/favicon.png",
+      "images/icon-512.png"
+    ]))
+    .catch(err => console.error(err))
+  );
+});
+
+// (B) CLAIM CONTROL INSTANTLY
+self.addEventListener("activate", evt => self.clients.claim());
+
+// (C) LOAD FROM CACHE FIRST, FALLBACK TO NETWORK IF NOT FOUND
+self.addEventListener("fetch", evt => evt.respondWith(
+  caches.match(evt.request).then(res => res || fetch(evt.request))
+));
+
+</script>
+
+ </head>
+  <body>
+    <!-- (A) PAGE A : ITEMS LIST -->
+    <div id="pgA" class="ninja">
+      <div id="itemAdd" onclick="items.addEdit()">+</div>
+      <div id="itemList" class="zebra"></div>
+    </div>
+
+    <!-- (B) PAGE B : ADD ITEM -->
+    <form id="pgB" class="ninja" onsubmit="items.save(); return false;">
+      <label>SKU</label>
+      <input type="hidden" id="itemOSKU">
+      <input type="text" required id="itemSKU">
+      <label>Name</label>
+      <input type="text" required id="itemName">
+      <div id="itemGo" class="flex">
+        <input type="button" value="Back" onclick="inv.pg('A')">
+        <input type="submit" value="Save">
+      </div>
+    </form>
+
+    <!-- (C) PAGE C : MOVEMENT -->
+    <div id="pgC" class="ninja">
+      <!-- (C1) MOVEMENT FORM -->
+      <form onsubmit="move.save(); return false;">
+        <label>SKU</label>
+        <input type="text" readonly id="moveSKU">
+        <label>Direction</label>
+        <select id="moveDirection">
+          <option value="I">In</option>
+          <option value="O">Out</option>
+          <option value="T">Stock Take</option>
+        </select>
+        <label>Quantity</label>
+        <input type="number" required id="moveQty">
+        <div id="mGo" class="flex">
+          <input type="button" value="Back" onclick="inv.pg('A')">
+          <input type="submit" value="Save">
+        </div>
+      </form>
+
+      <!-- (C2) MOVEMENT HISTORY -->
+      <div id="moveList" class="zebra"></div>
+      <input id="moveBack" type="button" value="Back" onclick="inv.pg('A')">
+    </div>
+  </body>
+</html>
